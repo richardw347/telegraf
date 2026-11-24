@@ -183,7 +183,7 @@ func (d *Docker) Start(telegraf.Accumulator) error {
 		d.Stop()
 		return &internal.StartupError{
 			Err:   fmt.Errorf("failed to ping daemon: %w", err),
-			Retry: client.IsErrConnectionFailed(err),
+			Retry: client.IsErrConnectionFailed(err) || errors.Is(err, context.DeadlineExceeded),
 		}
 	}
 
@@ -225,7 +225,7 @@ func (d *Docker) Start(telegraf.Accumulator) error {
 		d.Stop()
 		return &internal.StartupError{
 			Err:   fmt.Errorf("failed to get Docker info: %w", err),
-			Retry: client.IsErrConnectionFailed(err),
+			Retry: client.IsErrConnectionFailed(err) || errors.Is(err, context.DeadlineExceeded),
 		}
 	}
 	d.engineHost = info.Info.Name

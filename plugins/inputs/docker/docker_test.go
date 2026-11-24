@@ -3,8 +3,12 @@ package docker
 import (
 	"net/http"
 	"net/http/httptest"
+	"net/http/httputil"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1337,6 +1341,53 @@ func TestStartupErrorBehaviorRetry(t *testing.T) {
 
 	plugin.Endpoint = addr
 	require.NoError(t, model.Gather(&acc))
+}
+
+func TestStartupTimeoutRetry(t *testing.T) {
+	for _, endpoint := range []string{"/_ping", "/info"} {
+		t.Run(endpoint, func(t *testing.T) {
+			backend, err := mock.NewServerFromFiles("testdata")
+			require.NoError(t, err)
+			backend.APIVersion = "1.24"
+			address := backend.Start(t)
+			defer backend.Close()
+			target, err := url.Parse(address)
+			require.NoError(t, err)
+			proxy := httputil.NewSingleHostReverseProxy(target)
+			var unavailable atomic.Bool
+			unavailable.Store(true)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if unavailable.Load() && strings.HasSuffix(r.URL.Path, endpoint) {
+					<-r.Context().Done()
+					return
+				}
+				proxy.ServeHTTP(w, r)
+			}))
+			defer server.Close()
+
+			plugin := &Docker{
+				Endpoint:     server.URL,
+				Timeout:      config.Duration(100 * time.Millisecond),
+				TotalInclude: []string{"cpu"},
+			}
+			model := models.NewRunningInput(plugin, &models.InputConfig{
+				Name:                 "docker",
+				Alias:                "timeout-retry-" + endpoint,
+				StartupErrorBehavior: "retry",
+			})
+			require.NoError(t, model.Init())
+			defer model.Stop()
+			var acc testutil.Accumulator
+			// A timed-out startup must keep the plugin registered for retries.
+			require.NoError(t, model.Start(&acc))
+			require.ErrorIs(t, model.Gather(&acc), internal.ErrNotConnected)
+			// Recover on the same endpoint without an agent restart.
+			unavailable.Store(false)
+			require.NoError(t, model.Gather(&acc))
+			require.True(t, acc.HasMeasurement("docker_container_cpu"))
+			require.True(t, acc.HasMeasurement("docker_container_mem"))
+		})
+	}
 }
 
 func TestStartupSuccess(t *testing.T) {
