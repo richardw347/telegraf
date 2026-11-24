@@ -116,3 +116,54 @@ python3 verify.py /path/to/patched/telegraf "$TEST_ARTIFACTS/patched-recovery" \
 
 Each run writes `results.json` plus per-trial configuration, output and logs.
 No production configuration or data is used.
+
+## Generic input-startup cleanup fix
+
+A separate agent change starts the processor, aggregator and output consumers
+before starting service inputs. When an input fails to start, the agent stops
+the started inputs, closes the pipeline's input channel, drains and flushes the
+remaining metrics, and waits for downstream shutdown before returning the
+original startup error. It does not change any input's error or retry policy.
+
+This change is independent of the Docker timeout classification patch above.
+With the generic fix alone, the deliberately unresponsive Docker endpoint still
+causes an error exit, but the agent no longer stays alive with closed listeners.
+With both changes and `startup_error_behavior = "retry"`, the agent continues
+collecting other inputs and resumes Docker collection when the endpoint recovers.
+
+Additional Linux amd64 validation on 24 November 2026:
+
+- Official 1.40.4 with `startup_error_behavior` omitted: **100/100** confirmed
+  startup cleanup hangs.
+- Master `620deb84f26eec49a6bc8fe776975b3112926933` with only the generic cleanup
+  patch: **100/100** clean error exits for the default policy and **100/100**
+  for `retry` with the original Docker timeout classification. Every run
+  flushed all 101 distinct queued metrics and retained exit status 1.
+- The final-flush test uses a one-hour flush interval, so the metrics are
+  verified at shutdown rather than through periodic output flushing.
+- Both patches combined with `retry`: **100/100** delivered the UDP metrics
+  during the outage and recovered Docker CPU and memory in the same process.
+- The generic Go regression uses no Docker plugin. Six cases cover direct
+  outputs, processors, aggregators, processors before and after aggregation,
+  normal shutdown and failed probes. All passed 100 repetitions with the race
+  detector. Every case verifies queued metrics, a metric emitted during Stop,
+  output closure and the final aggregation where configured.
+- Restoring the original `agent.go` through a Go overlay makes the direct-output
+  regression fail its bounded startup-cleanup timeout.
+
+The cleanup/combined binaries used the same small plugin selection as the
+previous end-to-end tests. Commands using the extended repeat-test tool:
+
+```sh
+python3 verify.py /path/to/stock/telegraf "$TEST_ARTIFACTS/default-hang" \
+  --config . --mode broken --policy default --count 100
+python3 verify.py /path/to/cleanup/telegraf "$TEST_ARTIFACTS/default-cleanup" \
+  --config . --mode cleanup --policy default --count 100
+python3 verify.py /path/to/cleanup/telegraf "$TEST_ARTIFACTS/retry-cleanup" \
+  --config . --mode cleanup --policy retry --count 100
+python3 verify.py /path/to/combined/telegraf "$TEST_ARTIFACTS/combined-recovery" \
+  --config . --mode patched --policy retry --count 100
+```
+
+`--policy default` omits the setting entirely; `--policy error` sets it
+explicitly. The original minimal example files and commands remain unchanged.

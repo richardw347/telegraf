@@ -103,9 +103,13 @@ def trial(args, number):
     listener.write_text(args.config.joinpath("listener.conf").read_text()
                         .replace(":18094", f":{udp_port}").replace('= "1s"', '= "100ms"'))
     docker.write_text(args.config.joinpath("docker.conf").read_text()
-                      .replace(":18095", f":{server.server_port}"))
+                      .replace(":18095", f":{server.server_port}")
+                      .replace('startup_error_behavior = "retry"', '' if args.policy == "default" else f'startup_error_behavior = "{args.policy}"'))
+    if args.mode == "cleanup":
+        # Prove the final shutdown flush works, not just periodic flushing.
+        listener.write_text(listener.read_text().replace('flush_interval = "100ms"', 'flush_interval = "1h"'))
     output, log = directory / "metrics.lp", directory / "telegraf.log"
-    record = {"trial": number, "mode": args.mode}
+    record = {"trial": number, "mode": args.mode, "policy": args.policy}
     process = None
     try:
         with output.open("w") as stdout, log.open("w") as stderr:
@@ -115,6 +119,15 @@ def trial(args, number):
             if args.mode == "control":
                 assert process.wait(timeout=4) == 1, "Expected startup error with no traffic"
                 record["exit_code"] = 1
+            elif args.mode == "cleanup":
+                assert process.wait(timeout=4) == 1, "Expected original startup error"
+                lines = output.read_text().splitlines()
+                assert len(lines) == 101, f"Expected 101 flushed metrics, got {len(lines)}"
+                indexes = {int(re.search(r",n=(\d+)", line)[1]) for line in lines}
+                assert indexes == set(range(101)), "Missing or duplicated queued metric"
+                assert "failed to ping daemon" in log.read_text()
+                assert not owns_udp(process.pid, udp_port)
+                record.update(exit_code=1, flushed_metrics=101, owned_udp=False)
             elif args.mode == "broken":
                 # Do not mistake a transient /proc snapshot during socket
                 # creation for the post-timeout shutdown state.
@@ -164,7 +177,8 @@ if __name__ == "__main__":
     parser.add_argument("binary", type=Path)
     parser.add_argument("output", type=Path)
     parser.add_argument("--config", type=Path, required=True)
-    parser.add_argument("--mode", choices=["broken", "control", "patched"], required=True)
+    parser.add_argument("--mode", choices=["broken", "control", "patched", "cleanup"], required=True)
+    parser.add_argument("--policy", choices=["default", "error", "retry"], default="retry")
     parser.add_argument("--count", type=int, default=100)
     parser.add_argument("--workers", type=int, default=4)
     args = parser.parse_args()
@@ -173,7 +187,7 @@ if __name__ == "__main__":
     version = subprocess.check_output([str(args.binary), "--version"], text=True).strip()
     with ThreadPoolExecutor(max_workers=args.workers) as pool:
         results = list(pool.map(lambda i: trial(args, i), range(args.count)))
-    summary = {"version": version, "mode": args.mode, "passed": sum(r["passed"] for r in results),
+    summary = {"version": version, "mode": args.mode, "policy": args.policy, "passed": sum(r["passed"] for r in results),
                "total": len(results), "results": results}
     (args.output / "results.json").write_text(json.dumps(summary, indent=2) + "\n")
     print(json.dumps({k: v for k, v in summary.items() if k != "results"}), flush=True)
