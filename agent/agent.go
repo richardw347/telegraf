@@ -161,11 +161,9 @@ func (a *Agent) Run(ctx context.Context) error {
 		}
 	}
 
-	iu, err := a.startInputs(next, a.Config.Inputs)
-	if err != nil {
-		return err
-	}
-
+	// Service inputs may produce metrics during Start and must finish writing
+	// them before Stop returns. Start consumers first so startup cleanup cannot
+	// deadlock on a full metric channel if a later input fails to start.
 	var wg sync.WaitGroup
 	wg.Go(func() {
 		a.runOutputs(ou)
@@ -185,6 +183,15 @@ func (a *Agent) Run(ctx context.Context) error {
 		wg.Go(func() {
 			a.runProcessors(pu)
 		})
+	}
+
+	iu, err := a.startInputs(next, a.Config.Inputs)
+	if err != nil {
+		// startInputs has stopped the inputs. Drain the remaining metrics and
+		// stop the downstream plugins before returning the startup error.
+		close(next)
+		wg.Wait()
+		return err
 	}
 
 	wg.Go(func() {
