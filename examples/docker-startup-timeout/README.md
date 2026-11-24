@@ -119,6 +119,8 @@ No production configuration or data is used.
 
 ## Generic input-startup cleanup fix
 
+Review the independent agent fix in [PR #2](https://github.com/richardw347/telegraf/pull/2).
+
 A separate agent change starts the processor, aggregator and output consumers
 before starting service inputs. When an input fails to start, the agent stops
 the started inputs, closes the pipeline's input channel, drains and flushes the
@@ -150,6 +152,12 @@ Additional Linux amd64 validation on 24 November 2026:
   output closure and the final aggregation where configured.
 - Restoring the original `agent.go` through a Go overlay makes the direct-output
   regression fail its bounded startup-cleanup timeout.
+- All tests in the `agent`, `models`, `plugins/common/socket`,
+  `plugins/inputs/socket_listener` and `plugins/inputs/docker` packages passed
+  with `-short -race -count=1`, without custom build tags. The initial combined
+  run was terminated during compilation; the completed checks ran separately.
+  Socket tests needed short `TMPDIR` and `GOTMPDIR` paths on the same SSD to
+  stay within Linux's Unix-domain socket path limit.
 
 The cleanup/combined binaries used the same small plugin selection as the
 previous end-to-end tests. Commands using the extended repeat-test tool:
